@@ -134,9 +134,9 @@ class LLaMABlock(nn.Module):
         residual = x
         x = self.ln(x)
         x = self.attn(
-            q=x,
-            mask=mask,
-            position_ids=position_ids,
+            x,
+            mask,
+            position_ids,
             attn_algorithm=attn_algorithm,
             past_key_value_state=self_attn_past_key_value,
             use_cache=use_cache,
@@ -224,6 +224,10 @@ class LLaMA(nn.Module):
         layers = []
         for i in range(self.config.nlayers):
             block: nn.Module = LLaMABlock(self.config, self.rot_emb)
+            if isinstance(self.distributed_strategy, TensorParallelStrategy):
+                attn_layer = block.attn
+                attn_layer.nheads = attn_layer.nheads // self.distributed_strategy.device_mesh.size()
+                attn_layer.kvheads = attn_layer.kvheads // self.distributed_strategy.device_mesh.size()
             block = self.distributed_strategy.distribute_layer(block, i)
             layers.append(block)
         self.layers = nn.ModuleList(layers)
@@ -241,7 +245,7 @@ class LLaMA(nn.Module):
         )
 
         if self.config.p_dropout:
-            self.dropout = nn.Dropout(self.config.p_dropout)
+            self.dropout = self.distributed_strategy.distribute_module(nn.Dropout(self.config.p_dropout))
 
     def get_config(self) -> LLaMAConfig:
         return self.config
@@ -348,7 +352,6 @@ class LLaMA(nn.Module):
         # bias: nheads x seq_len x seq_len
         if past_key_value_states is None or len(past_key_value_states) == 0:
             past_key_value_states = [None for _ in range(len(self.layers))]
-
         qlen = x_in.size(1)
         klen = x_in.size(1)
 
@@ -374,7 +377,7 @@ class LLaMA(nn.Module):
 
         for i, layer in enumerate(self.layers):
             output = layer(
-                x=x_in,
+                x_in,
                 mask=mask,
                 position_ids=position_ids,
                 past_key_value_state=past_key_value_states[i],
